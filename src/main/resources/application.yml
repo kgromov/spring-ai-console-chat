@@ -7,6 +7,9 @@ spring:
       chat:
         options:
           model: gpt-4
+      embedding:
+        options:
+          model: text-embedding-3-small
 settings:
   input:
     source: "input-sources/htmlcheatsheet.pdf"

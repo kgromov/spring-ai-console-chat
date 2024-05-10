@@ -1,6 +1,8 @@
 package org.kgromov;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.ChatClient;
+import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingClient;
@@ -16,63 +18,78 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
-import org.springframework.context.annotation.DependsOn;
 import org.springframework.core.io.Resource;
+import org.springframework.util.StopWatch;
 
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
-import java.util.stream.Collectors;
 
+import static java.util.stream.Collectors.joining;
+
+@Slf4j
 @SpringBootApplication
 public class SpringAiConsoleChatApplication {
-    @Value("classpath:${settings.input.source}")
-    private Resource resource;
 
     public static void main(String[] args) {
         SpringApplication.run(SpringAiConsoleChatApplication.class, args);
     }
 
     @Bean
-    VectorStore vectorStore(EmbeddingClient embeddingClient) {
-        return new SimpleVectorStore(embeddingClient);
-    }
-
-    void init(VectorStore vectorStore, Resource pdfResource) {
+    VectorStore vectorStore(EmbeddingClient embeddingClient,
+                            @Value("classpath:${settings.input.source}") Resource pdfResource) {
+        var vectorStore = new SimpleVectorStore(embeddingClient);
         var config = PdfDocumentReaderConfig.builder()
-                .withPageExtractedTextFormatter(new ExtractedTextFormatter.Builder().withNumberOfBottomTextLinesToDelete(3)
-                        .withNumberOfTopPagesToSkipBeforeDelete(1)
+                .withPageExtractedTextFormatter(new ExtractedTextFormatter.Builder()
+                        .withNumberOfBottomTextLinesToDelete(0)
+                        .withNumberOfTopPagesToSkipBeforeDelete(0)
                         .build())
                 .withPagesPerDocument(1)
                 .build();
         var pdfReader = new PagePdfDocumentReader(pdfResource, config);
         var textSplitter = new TokenTextSplitter();
         vectorStore.accept(textSplitter.apply(pdfReader.get()));
+        return vectorStore;
     }
 
     @Bean
-    ApplicationRunner interactiveChatRunner(VectorStore vectorStore, ChatClient chatClient) {
+    ApplicationRunner interactiveChatRunner(VectorStore vectorStore,
+                                            ChatClient chatClient,
+                                            @Value("classpath:/prompts/prompt-template.st") Resource promptTemplate) {
         return args -> {
-            System.out.println("Spin up chat");
-            Scanner scanner = new Scanner(System.in);
-            while (true) {
-                System.out.print("User: ");
-                String question = scanner.nextLine();
+            log.info("Spin up chat");
+            try(Scanner scanner = new Scanner(System.in)) {
+                while (true) {
+                    System.out.print("User: ");
+                    String question = scanner.nextLine();
 
-                if ("exit".equalsIgnoreCase(question)) {
-                    break;
+                    if ("exit".equalsIgnoreCase(question)) {
+                        break;
+                    }
+                    StopWatch stopWatch = new StopWatch();
+                    stopWatch.start("Answer question");
+                    try {
+                        var documents = vectorStore.similaritySearch(SearchRequest.query(question).withTopK(3));
+                        String documentsContent = documents.stream().map(Document::getContent).collect(joining("\n"));
+                        var template = new PromptTemplate(promptTemplate);
+                        Prompt prompt = template.create(
+                                Map.of(
+                                        "input", question,
+                                        "documents", documentsContent
+                                )
+                        );
+                        String answer = chatClient.call(prompt)
+                                .getResult()
+                                .getOutput()
+                                .getContent();
+
+                        System.out.println("Assistant: " + answer);
+                    } finally {
+                        stopWatch.stop();
+                        var taskInfo = stopWatch.lastTaskInfo();
+                        log.info("Time to {} = {} ms", taskInfo.getTaskName(), taskInfo.getTimeMillis());
+                    }
                 }
-                this.init(vectorStore, resource);
-                PromptTemplate promptTemplate = new PromptTemplate(question);
-                String answer = chatClient.call(promptTemplate.create())
-                        .getResult()
-                        .getOutput()
-                        .getContent();
-                System.out.println("Agent: " + answer);
             }
-            scanner.close();
         };
     }
-
 }
